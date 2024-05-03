@@ -1,20 +1,20 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path"
 
-	"github.com/konveyor/tackle2-addon/repository"
-	"github.com/konveyor/tackle2-addon/ssh"
+	liberr "github.com/jortel/go-utils/error"
 	hub "github.com/konveyor/tackle2-hub/addon"
+	"github.com/konveyor/tackle2-hub/nas"
 )
 
 var (
-	addon   = hub.Addon
-	Dir     = ""
-	RepoDir = ""
-	HomeDir = ""
+	addon          = hub.Addon
+	Dir            = ""
+	OutputDir      = ""
+	HomeDir        = ""
+	KubeConfigPath = ""
 )
 
 type Data struct {
@@ -23,8 +23,9 @@ type Data struct {
 
 func init() {
 	Dir, _ = os.Getwd()
-	RepoDir = path.Join(Dir, "repository")
+	OutputDir = path.Join(Dir, "output")
 	HomeDir, _ = os.UserHomeDir()
+	KubeConfigPath = path.Join(HomeDir, ".kubeconfig")
 }
 
 func main() {
@@ -42,44 +43,37 @@ func main() {
 			return
 		}
 
-		if application.Repository == nil {
-			err = errors.New("application repository not defined")
+		if application.Deployment == nil {
+			err = liberr.New("Application does not have a cluster deployment.")
 			return
 		}
-
-		//
-		// SSH
-		agent := ssh.Agent{}
-		err = agent.Start()
+		deployment, err := addon.Deployment.Get(application.Deployment.ID)
+		if err != nil {
+			return
+		}
+		identity, err := addon.Identity.Get(deployment.Identity.ID)
+		if err != nil {
+			return
+		}
+		platform, err := addon.Platform.Get(deployment.Platform.ID)
 		if err != nil {
 			return
 		}
 
-		rp, err := repository.New(RepoDir, application.Repository, application.Identities)
-		if err != nil {
-			return
-		}
-		err = rp.Fetch()
-		if err != nil {
-			return
-		}
-		err = rp.Branch("crane")
-		if err != nil {
-			return
-		}
-		rm := Rm{}
-		err = rm.Run()
+		c := NewClusterDeployment(deployment, identity, platform)
+		err = c.WriteKubeConfig()
 		if err != nil {
 			return
 		}
 
-		kube := Kubernetes{Identities: application.Identities}
-		err = kube.WriteKubeConfig()
+		addon.Activity("Creating output directory (%s)", OutputDir)
+		err = nas.MkDir(OutputDir, 0755)
 		if err != nil {
 			return
 		}
 
-		export := Export{Data: d}
+		addon.Activity("Prepare to run crane.")
+		export := Export{Namespace: deployment.Locator}
 		err = export.Run()
 		if err != nil {
 			return
@@ -97,12 +91,13 @@ func main() {
 			return
 		}
 
-		err = rp.Commit([]string{"."}, "transformed by crane")
+		addon.Activity("Uploading assets to application bucket.")
+		bucket := addon.Application.Bucket(application.ID)
+		err = bucket.Put(OutputDir, "crane")
 		if err != nil {
 			return
 		}
 
-		println(application)
 		return
 	})
 }
